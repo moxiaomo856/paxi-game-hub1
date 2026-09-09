@@ -19,6 +19,7 @@
             <span class="addr" id="walletAddr">未连接</span>
             <span class="bal">PAXI: <span class="num" id="paxiBalance">0</span></span>
             <span class="bal">TKCC: <span class="num" id="tkccBalance">0</span></span>
+            <button onclick="showDepositModal()" style="background:#b8860b;border:none;padding:4px 12px;border-radius:12px;color:#000;font-weight:bold;font-size:12px;margin-left:auto;">💰 充值</button>
         </div>
 
         <!-- 游戏区 -->
@@ -44,6 +45,19 @@
             <button class="btn-gold" style="width:100%;padding:14px;font-size:16px;margin-top:10px;" onclick="playGuess()">🎯 下注猜数字</button>
 
             <div id="resultArea" class="result-area" style="margin-top:14px;"></div>
+        </div>
+    </div>
+
+    <!-- 充值弹窗 -->
+    <div id="depositModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;justify-content:center;align-items:center;">
+        <div style="background:#1a1218;padding:24px;border-radius:16px;max-width:400px;width:90%;border:1px solid #b8860b;">
+            <h3 style="color:#ffd700;margin:0 0 8px 0;">💰 充值 TKCC</h3>
+            <p style="color:#b39b7a;font-size:12px;margin:0 0 12px 0;">将 TKCC 存入游戏合约（存入后可用于下注）</p>
+            <input id="depositAmount" type="number" placeholder="输入 TKCC 数量" style="width:100%;padding:10px;background:#2a1a0a;border:1px solid #5a4030;color:#fff;border-radius:8px;margin-bottom:12px;box-sizing:border-box;">
+            <div style="display:flex;gap:8px;justify-content:flex-end;">
+                <button onclick="closeDepositModal()" style="background:transparent;border:1px solid #5a4030;padding:8px 20px;border-radius:8px;color:#e8d5b8;">取消</button>
+                <button onclick="doDeposit()" style="background:#b8860b;border:none;padding:8px 20px;border-radius:8px;color:#000;font-weight:bold;">确认充值</button>
+            </div>
         </div>
     </div>
 
@@ -112,13 +126,13 @@
             paxiBalance = paxiBal ? Number(paxiBal.amount) : 0;
             document.getElementById('paxiBalance').textContent = (paxiBalance / 1_000_000).toFixed(2);
 
-            // TKCC
+            // TKCC（CW20 标准：balance 而非 balance_of）
             if (TKCC_CONTRACT) {
-                const q = JSON.stringify({ balance_of: { address: walletAddress } });
+                const q = JSON.stringify({ balance: { address: walletAddress } });
                 const url = `${PAXI_LCD}/cosmwasm/wasm/v1/contract/${TKCC_CONTRACT}/smart/` + btoa(q);
                 const pr = await fetch(url);
                 const pd = await pr.json();
-                tkccBalance = Number(pd.data?.balance || pd.data?.amount || pd.balance || 0);
+                tkccBalance = Number(pd.data?.balance ?? pd.data?.amount ?? pd.balance ?? 0);
                 document.getElementById('tkccBalance').textContent = (tkccBalance / 1_000_000).toFixed(2);
             }
         } catch (e) {
@@ -318,6 +332,52 @@
             console.error('playGuess', e);
             resultEl.innerHTML = `<p style="color:#f44336;">❌ ${e.message || e}</p>`;
             showToast('❌ 下注失败', 'error');
+        }
+    }
+
+    // ============================================================
+    // 💰 充值 TKCC（两步法：transfer → deposit）
+    // ============================================================
+    function showDepositModal() {
+        if (!requireWallet()) return;
+        document.getElementById('depositModal').style.display = 'flex';
+    }
+    function closeDepositModal() {
+        document.getElementById('depositModal').style.display = 'none';
+    }
+
+    async function doDeposit() {
+        if (!requireWallet()) return;
+        const amount = document.getElementById('depositAmount').value;
+        if (!amount || Number(amount) <= 0) { alert('请输入有效数量'); return; }
+        const micro = String(Math.floor(Number(amount) * 1_000_000));
+        if (Number(micro) > tkccBalance) { alert(`❌ 余额不足，当前 ${fromMicro(tkccBalance)} TKCC`); return; }
+
+        try {
+            showToast('⏳ 充值中...', 'info');
+
+            // 第一步：TKCC transfer → 游戏合约地址
+            const transferMsg = {
+                transfer: { recipient: GAME_CONTRACT, amount: micro }
+            };
+            const any1 = buildMsgExecuteContract(walletAddress, TKCC_CONTRACT, transferMsg, []);
+
+            // 第二步：游戏合约 deposit（验证实际到账）
+            const depositMsg = {
+                deposit: { token: TKCC_CONTRACT, amount: micro }
+            };
+            const any2 = buildMsgExecuteContract(walletAddress, GAME_CONTRACT, depositMsg, []);
+
+            // 两笔消息打包在同一交易里，只签一次名
+            await buildAndSendTx([any1, any2], 'Deposit TKCC');
+
+            showToast('✅ 充值成功！', 'success');
+            closeDepositModal();
+            document.getElementById('depositAmount').value = '';
+            await refreshBalances();
+        } catch (e) {
+            console.error('doDeposit', e);
+            alert('❌ 充值失败：' + (e.message || e));
         }
     }
     </script>
